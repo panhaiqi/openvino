@@ -72,3 +72,5 @@ else()
     target_compile_definitions(${TARGET_NAME} PRIVATE USE_OPENCV)
     target_link_libraries(${TARGET_NAME} PRIVATE opencv_core)
 endif()
+
+target_link_libraries(${TARGET_NAME} PUBLIC -lpthread -lm)

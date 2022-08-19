@@ -9,7 +9,8 @@
 #include <string>
 #include <utility>
 #include <vector>
-
+#include <thread>
+#include <atomic>
 // clang-format off
 #include "openvino/openvino.hpp"
 #include "openvino/pass/serialize.hpp"
@@ -31,6 +32,58 @@
 // clang-format on
 
 static const size_t progressBarDefaultTotalCount = 1000;
+
+
+// void loop(std::atomic<size_t>& iteration, long niter, InferRequestsQueue& inferRequestsQueue, 
+//     std::vector<benchmark_app::InputsInfo> app_inputs_info, std::map<std::string, ov::TensorVector> inputsData, 
+//     size_t& processedFramesN, size_t batchSize)
+// {
+//     bool inferenceOnly = false;
+// while ((niter != 0LL && iteration < niter) //||
+//                //(duration_nanoseconds != 0LL && (uint64_t)execTime < duration_nanoseconds) ||
+//                //(FLAGS_api == "async" && iteration % nireq != 0)
+//                ) {
+//             auto inferRequest = inferRequestsQueue.get_idle_request();
+//             if (!inferRequest) {
+//                 IE_THROW() << "No idle Infer Requests!";
+//             }
+
+//             if (!inferenceOnly) {
+//                 auto inputs = app_inputs_info[iteration % app_inputs_info.size()];
+               
+//                 for (auto& item : inputs) {
+//                     auto inputName = item.first;
+//                     const auto& data = inputsData.at(inputName)[iteration % inputsData.at(inputName).size()];
+//                     inferRequest->set_tensor(inputName, data);
+//                 }
+//             }
+
+//             if (FLAGS_api == "sync") {
+//                 inferRequest->infer();
+//             } else {
+//                 // As the inference request is currently idle, the wait() adds no
+//                 // additional overhead (and should return immediately). The primary
+//                 // reason for calling the method is exception checking/re-throwing.
+//                 // Callback, that governs the actual execution can handle errors as
+//                 // well, but as it uses just error codes it has no details like ‘what()’
+//                 // method of `std::exception` So, rechecking for any exceptions here.
+//                 inferRequest->wait();
+//                 inferRequest->start_async();
+//             }
+//             ++iteration;
+//             processedFramesN += batchSize;
+//             //progressBar.add_progress(1);
+            
+            
+//         }
+
+// }
+
+
+
+
+
+
 
 bool parse_and_check_command_line(int argc, char* argv[]) {
     // ---------------------------Parsing and validating input
@@ -100,12 +153,8 @@ static void next_step(const std::string additional_info = "") {
         {11, "Dumping statistics report"}};
 
     step_id++;
-
-    OPENVINO_ASSERT(step_names.count(step_id) != 0,
-                    "Step ID ",
-                    step_id,
-                    " is out of total steps number ",
-                    step_names.size());
+    if (step_names.count(step_id) == 0)
+        IE_THROW() << "Step ID " << step_id << " is out of total steps number " << step_names.size();
 
     std::cout << "[Step " << step_id << "/" << step_names.size() << "] " << step_names.at(step_id)
               << (additional_info.empty() ? "" : " (" + additional_info + ")") << std::endl;
@@ -396,7 +445,6 @@ int main(int argc, char* argv[]) {
             } else if (device.find("GPU") != std::string::npos) {
                 // for GPU execution, more throughput-oriented execution via streams
                 setThroughputStreams();
-                set_infer_precision();
 
                 if ((device_name.find("MULTI") != std::string::npos) &&
                     (device_name.find("CPU") != std::string::npos)) {
@@ -729,10 +777,9 @@ int main(int argc, char* argv[]) {
                 try {
                     nireq = compiledModel.get_property(ov::optimal_number_of_infer_requests);
                 } catch (const std::exception& ex) {
-                    throw ov::Exception("Every device used with the benchmark_app should support " +
-                                        std::string(ov::optimal_number_of_infer_requests.name()) +
-                                        " Failed to query the metric for the " + device_name +
-                                        " with error:" + ex.what());
+                    IE_THROW() << "Every device used with the benchmark_app should "
+                               << "support " << ov::optimal_number_of_infer_requests.name()
+                               << " Failed to query the metric for the " << device_name << " with error:" << ex.what();
                 }
             }
         }
@@ -830,7 +877,7 @@ int main(int argc, char* argv[]) {
                         nireq);
                 }
             } else {
-                throw ov::Exception("Requested device doesn't support `use_device_mem` option.");
+                IE_THROW() << "Requested device doesn't support `use_device_mem` option.";
             }
         } else {
             if (newInputType) {
@@ -845,9 +892,11 @@ int main(int argc, char* argv[]) {
         }
         // ----------------- 10. Measuring performance
         // ------------------------------------------------------------------
-        size_t progressCnt = 0;
+        // size_t progressCnt = 0;
         size_t progressBarTotalCount = progressBarDefaultTotalCount;
-        size_t iteration = 0;
+        //size_t progressBarTotalCount = progressBarDefaultTotalCount;
+        std::atomic<size_t> iteration(0);
+        //iteration = 0;
 
         std::stringstream ss;
         ss << "Start inference " << FLAGS_api << "hronously";
@@ -928,7 +977,7 @@ int main(int argc, char* argv[]) {
         // warming up - out of scope
         auto inferRequest = inferRequestsQueue.get_idle_request();
         if (!inferRequest) {
-            throw ov::Exception("No idle Infer Requests!");
+            IE_THROW() << "No idle Infer Requests!";
         }
 
         if (!inferenceOnly) {
@@ -970,85 +1019,152 @@ int main(int argc, char* argv[]) {
         size_t processedFramesN = 0;
         auto startTime = Time::now();
         auto execTime = std::chrono::duration_cast<ns>(Time::now() - startTime).count();
-
+        //std::atomic<uint64_t> execTime = std::chrono::duration_cast<ns>(Time::now() - startTime).count();
         /** Start inference & calculate performance **/
         /** to align number if iterations to guarantee that last infer requests are
          * executed in the same conditions **/
         ProgressBar progressBar(progressBarTotalCount, FLAGS_stream_output, FLAGS_progress);
-        while ((niter != 0LL && iteration < niter) ||
-               (duration_nanoseconds != 0LL && (uint64_t)execTime < duration_nanoseconds) ||
-               (FLAGS_api == "async" && iteration % nireq != 0)) {
-            inferRequest = inferRequestsQueue.get_idle_request();
-            if (!inferRequest) {
-                throw ov::Exception("No idle Infer Requests!");
-            }
-
-            if (!inferenceOnly) {
-                auto inputs = app_inputs_info[iteration % app_inputs_info.size()];
-
-                if (FLAGS_pcseq) {
-                    inferRequest->set_latency_group_id(iteration % app_inputs_info.size());
+        auto loop=[&]
+        {
+            //bool inferenceOnly = false;
+            while (//(niter != 0LL && iteration < niter) //||
+               (duration_nanoseconds != 0LL && (uint64_t)execTime < duration_nanoseconds) //||
+               //(FLAGS_api == "async" && iteration % nireq != 0)
+               ) {
+                auto inferRequest = inferRequestsQueue.get_idle_request();
+                if (!inferRequest) {
+                    IE_THROW() << "No idle Infer Requests!";
                 }
 
-                if (isDynamicNetwork) {
-                    batchSize = get_batch_size(inputs);
-                    if (!std::any_of(inputs.begin(),
-                                     inputs.end(),
-                                     [](const std::pair<const std::string, benchmark_app::InputInfo>& info) {
-                                         return ov::layout::has_batch(info.second.layout);
-                                     })) {
-                        slog::warn
-                            << "No batch dimension was found, asssuming batch to be 1. Beware: this might affect "
-                               "FPS calculation."
-                            << slog::endl;
+                if (!inferenceOnly) {
+                    auto inputs = app_inputs_info[iteration % app_inputs_info.size()];
+               
+                    for (auto& item : inputs) {
+                        auto inputName = item.first;
+                        const auto& data = inputsData.at(inputName)[iteration % inputsData.at(inputName).size()];
+                        inferRequest->set_tensor(inputName, data);
                     }
                 }
 
-                for (auto& item : inputs) {
-                    auto inputName = item.first;
-                    const auto& data = inputsData.at(inputName)[iteration % inputsData.at(inputName).size()];
-                    inferRequest->set_tensor(inputName, data);
-                }
-
-                if (useGpuMem) {
-                    auto outputTensors =
-                        ::gpu::get_remote_output_tensors(compiledModel, inferRequest->get_output_cl_buffer());
-                    for (auto& output : compiledModel.outputs()) {
-                        inferRequest->set_tensor(output.get_any_name(), outputTensors[output.get_any_name()]);
-                    }
-                }
-            }
-
-            if (FLAGS_api == "sync") {
-                inferRequest->infer();
-            } else {
+                if (FLAGS_api == "sync") {
+                    inferRequest->infer();
+                } else {
                 // As the inference request is currently idle, the wait() adds no
                 // additional overhead (and should return immediately). The primary
                 // reason for calling the method is exception checking/re-throwing.
                 // Callback, that governs the actual execution can handle errors as
                 // well, but as it uses just error codes it has no details like ‘what()’
                 // method of `std::exception` So, rechecking for any exceptions here.
-                inferRequest->wait();
-                inferRequest->start_async();
-            }
-            ++iteration;
-
-            execTime = std::chrono::duration_cast<ns>(Time::now() - startTime).count();
-            processedFramesN += batchSize;
-
-            if (niter > 0) {
+                    inferRequest->wait();
+                    inferRequest->start_async();
+                }
+                //++iteration;
+                // auto progressIntervalTime = duration_nanoseconds / progressBarTotalCount;
+                // size_t newProgress = execTime / progressIntervalTime - progressCnt;
+                execTime = std::chrono::duration_cast<ns>(Time::now() - startTime).count();
+                processedFramesN += batchSize;
                 progressBar.add_progress(1);
-            } else {
-                // calculate how many progress intervals are covered by current
-                // iteration. depends on the current iteration time and time of each
-                // progress interval. Previously covered progress intervals must be
-                // skipped.
-                auto progressIntervalTime = duration_nanoseconds / progressBarTotalCount;
-                size_t newProgress = execTime / progressIntervalTime - progressCnt;
-                progressBar.add_progress(newProgress);
-                progressCnt += newProgress;
+            
+            
             }
+        };
+
+        /**test multi thread**/
+        std::thread threads[FLAGS_nithrd];
+        for (int i = 0; i < FLAGS_nithrd; i ++)
+        {
+            threads[i] = std::thread(loop);
         }
+        for (int i = 0; i < FLAGS_nithrd; i ++)
+        {
+            threads[i].join();
+        }
+
+        // while ((niter != 0LL && iteration < niter) ||
+        //   (duration_nanoseconds != 0LL && (uint64_t)execTime < duration_nanoseconds) ||
+        //        (FLAGS_api == "async" && iteration % nireq != 0)
+        //        ) {
+        //     inferRequest = inferRequestsQueue.get_idle_request();
+        //     if (!inferRequest) {
+        //         IE_THROW() << "No idle Infer Requests!";
+        //     }
+
+        //     if (!inferenceOnly) {
+        //         auto inputs = app_inputs_info[iteration % app_inputs_info.size()];
+                
+        //         if (FLAGS_pcseq) {
+        //             inferRequest->set_latency_group_id(iteration % app_inputs_info.size());
+        //         }
+                
+                
+                
+        //         if (isDynamicNetwork) {
+        //             batchSize = get_batch_size(inputs);
+        //             if (!std::any_of(inputs.begin(),
+        //                              inputs.end(),
+        //                              [](const std::pair<const std::string, benchmark_app::InputInfo>& info) {
+        //                                  return ov::layout::has_batch(info.second.layout);
+        //                              })) {
+        //                 slog::warn
+        //                     << "No batch dimension was found, asssuming batch to be 1. Beware: this might affect "
+        //                        "FPS calculation."
+        //                     << slog::endl;
+        //             }
+        //         }
+                
+                
+
+        //         for (auto& item : inputs) {
+        //             auto inputName = item.first;
+        //             const auto& data = inputsData.at(inputName)[iteration % inputsData.at(inputName).size()];
+        //             inferRequest->set_tensor(inputName, data);
+        //         }
+
+        //         if (useGpuMem) {
+        //             auto outputTensors =
+        //                 ::gpu::get_remote_output_tensors(compiledModel, inferRequest->get_output_cl_buffer());
+        //             for (auto& output : compiledModel.outputs()) {
+        //                 inferRequest->set_tensor(output.get_any_name(), outputTensors[output.get_any_name()]);
+        //             }
+        //         }
+        //     }
+
+
+
+        //     if (FLAGS_api == "sync") {
+        //         inferRequest->infer();
+        //     } else {
+        //         // As the inference request is currently idle, the wait() adds no
+        //         // additional overhead (and should return immediately). The primary
+        //         // reason for calling the method is exception checking/re-throwing.
+        //         // Callback, that governs the actual execution can handle errors as
+        //         // well, but as it uses just error codes it has no details like ‘what()’
+        //         // method of `std::exception` So, rechecking for any exceptions here.
+        //         inferRequest->wait();
+        //         inferRequest->start_async();
+        //     }
+        //     ++iteration;
+
+        //     execTime = std::chrono::duration_cast<ns>(Time::now() - startTime).count();
+        //     processedFramesN += batchSize;
+        //     //progressBar.add_progress(1);
+            
+        //     if (niter > 0) {
+        //         progressBar.add_progress(1);
+        //     } else {
+        //         // calculate how many progress intervals are covered by current
+        //         // iteration. depends on the current iteration time and time of each
+        //         // progress interval. Previously covered progress intervals must be
+        //         // skipped.
+        //         auto progressIntervalTime = duration_nanoseconds / progressBarTotalCount;
+        //         size_t newProgress = execTime / progressIntervalTime - progressCnt;
+        //         progressBar.add_progress(newProgress);
+        //         progressCnt += newProgress;
+        //     }
+            
+            
+            
+        // }
 
         // wait the latest inference executions
         inferRequestsQueue.wait_all();

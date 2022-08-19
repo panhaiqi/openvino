@@ -264,6 +264,9 @@ DEFINE_string(c, "", custom_cldnn_message);
 /// @brief Iterations count (default 0)
 /// Sync mode: iterations count
 /// Async mode: StartAsync counts
+// Number of threads to set input sentor
+DEFINE_uint32(nithrd, 1, iterations_count_message);
+
 DEFINE_uint32(niter, 0, iterations_count_message);
 
 /// @brief Time to execute topology in seconds
